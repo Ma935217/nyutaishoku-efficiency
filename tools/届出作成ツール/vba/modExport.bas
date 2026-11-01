@@ -19,6 +19,7 @@ Private Const SH_CONFIRM As String = "内容確認"
 Private Const SH_LOG As String = "ログ"
 
 Public gTestMode As Boolean                ' True のときメッセージボックスを出さない（試験用）
+Public gSkipSjis As Boolean                ' True のとき Shift_JIS の文字判定を省く（LibreOffice での試験用）
 
 Private mErr As Long, mWarn As Long, mMsgRow As Long
 Private mRow As Long, mStaffId As String, mStaffName As String, mItem As String   ' エラー表示用の現在位置
@@ -73,6 +74,7 @@ Public Sub btnExport()
         path = "「" & SH_CONFIRM & "」シート（転記一覧）"
     End If
     MarkExported kind, info, grid
+    If CStr(info(3)) <> "" Then BumpSeq
     WriteLog kind, n, path, "成功"
     Say n & " 件を出力しました：" & path
     Exit Sub
@@ -204,6 +206,8 @@ Private Function ItemValue(lay As Variant, ByVal i As Long, ws As Worksheet, ByV
         If c = 0 Then AddMsg "エラー", "台帳に列「" & Mid$(src, 4) & "」がありません（レイアウト定義の取得元を確認）": Exit Function
         If c < 0 Then AddMsg "エラー", "台帳の列「" & Mid$(src, 4) & "」が重複しています": Exit Function
         v = ws.Cells(r, c).Value
+    ElseIf src = "システム:今日" Then
+        v = Date
     ElseIf Left$(src, 3) = "設定:" Then
         v = Setting(Mid$(src, 4), ok)
         If Not ok Then AddMsg "エラー", "設定シートに名前「" & Mid$(src, 4) & "」がありません": Exit Function
@@ -221,6 +225,7 @@ Private Sub CheckValue(ByVal s As String, lay As Variant, ByVal i As Long, ByVal
     Dim lvl As Integer
     If mCondFalse Then Exit Sub
     If lay(i, 9) = "○" And s = "" Then AddMsg "エラー", "必須項目が空です" & IIf(lay(i, 12) <> "", "（" & lay(i, 12) & "）", ""): Exit Sub
+    If lay(i, 9) = "△" And s = "" Then AddMsg "警告", "空です。届書に必要な場合は入力してください" & IIf(lay(i, 12) <> "", "（" & lay(i, 12) & "）", ""): Exit Sub
     If Val(lay(i, 8)) > 0 Then
         If Len(s) > Val(lay(i, 8)) Then AddMsg "エラー", "桁数オーバーです（" & lay(i, 8) & "桁まで／現在 " & Len(s) & "桁）"
     End If
@@ -307,29 +312,96 @@ End Function
 '==================== 値の変換・書式 ====================
 
 Private Function Transform(ByVal v As Variant, ByVal conv As String) As Variant
-    Dim t As Variant, nm As String
+    Dim t As Variant
     For Each t In Split(conv, "+")
         t = Trim$(t)
-        If t = "" Or CellText(v) = "" Then Exit For
-        Select Case t
-        Case "全角カナ": v = StrConv(StrConv(CStr(v), vbKatakana), vbWide)
-        Case "半角": v = StrConv(CStr(v), vbNarrow)
-        Case "数字のみ": v = DigitsOnly(CStr(v))
-        Case "姓": v = NamePart(CStr(v), 1)
-        Case "名": v = NamePart(CStr(v), 2)
-        Case "翌日"
-            If IsDate(v) Then v = CDate(v) + 1 Else AddMsg "エラー", "日付として読めません：" & CStr(v): v = ""
-        Case "千円"
-            If IsNumeric(v) Then v = Int(CDbl(v) / 1000) Else AddMsg "エラー", "数値ではありません：" & CStr(v): v = ""
-        Case Else
-            If Left$(t, 5) = "コード表:" Then
-                v = CodeOf(Mid$(t, 6), Trim$(CStr(v)))
-            Else
-                AddMsg "エラー", "変換「" & t & "」は使えません"
-            End If
-        End Select
+        If t = "空なら0" Then
+            If CellText(v) = "" Then v = 0
+        ElseIf t = "" Or CellText(v) = "" Then
+            Exit For
+        Else
+            Select Case t
+            Case "全角カナ": v = StrConv(StrConv(CStr(v), vbKatakana), vbWide)
+            Case "半角": v = StrConv(CStr(v), vbNarrow)
+            Case "半角カナ": v = HalfKana(CStr(v))
+            Case "数字のみ": v = DigitsOnly(CStr(v))
+            Case "姓": v = NamePart(CStr(v), 1)
+            Case "名": v = NamePart(CStr(v), 2)
+            Case "漢字氏名": v = KanjiLimit(CStr(v), 12, "漢字氏名")
+            Case "漢字住所": v = KanjiLimit(CStr(v), 37, "漢字住所")
+            Case "翌日"
+                If IsDate(v) Then v = CDate(v) + 1 Else AddMsg "エラー", "日付として読めません：" & CStr(v): v = ""
+            Case "千円"
+                If IsNumeric(v) Then v = Int(CDbl(v) / 1000) Else AddMsg "エラー", "数値ではありません：" & CStr(v): v = ""
+            Case Else
+                If Left$(t, 5) = "コード表:" Then
+                    v = CodeOf(Mid$(t, 6), Trim$(CStr(v)))
+                ElseIf Left$(t, 2) = "年金" Or Left$(t, 2) = "郵便" Then
+                    v = SplitDigits(CStr(v), CStr(t))
+                ElseIf Left$(t, 2) = "電話" Then
+                    v = PhonePart(CStr(v), Val(Mid$(t, 3)))
+                Else
+                    AddMsg "エラー", "変換「" & t & "」は使えません"
+                End If
+            End Select
+        End If
     Next t
     Transform = v
+End Function
+
+' 半角カナにする（ひらがな→カタカナ→半角。空白は半角1文字にそろえる）
+Private Function HalfKana(ByVal s As String) As String
+    s = Replace(s, ChrW(&H3000), " ")
+    s = StrConv(StrConv(s, vbKatakana), vbNarrow)
+    Do While InStr(s, "  ") > 0
+        s = Replace(s, "  ", " ")
+    Loop
+    HalfKana = Trim$(s)
+End Function
+
+' 漢字欄：全角にそろえ、文字数オーバー・使えない文字があれば省略（仕様で省略可の欄）
+Private Function KanjiLimit(ByVal s As String, ByVal maxLen As Long, ByVal what As String) As String
+    s = Trim$(Replace(s, " ", ChrW(&H3000)))
+    Do While InStr(s, ChrW(&H3000) & ChrW(&H3000)) > 0
+        s = Replace(s, ChrW(&H3000) & ChrW(&H3000), ChrW(&H3000))
+    Loop
+    s = StrConv(s, vbWide)
+    If Len(s) > maxLen Then
+        AddMsg "警告", what & "が " & maxLen & " 文字を超えるため省略しました（省略可の欄）：" & s
+    ElseIf SjisLevel(s) > 0 Then
+        AddMsg "警告", what & "に使えない文字があるため省略しました（省略可の欄）：" & s
+    Else
+        KanjiLimit = s
+    End If
+End Function
+
+' 基礎年金番号（年金上4／年金下6）・郵便番号（郵便上3／郵便下4）を分ける
+Private Function SplitDigits(ByVal s As String, ByVal kind As String) As String
+    Dim d As String, total As Long, n As Long, label As String
+    label = Left$(kind, 2)
+    total = IIf(label = "年金", 10, 7)
+    n = Val(Mid$(kind, 4))
+    d = DigitsOnly(s)
+    If Len(d) <> total Then
+        AddMsg "エラー", IIf(label = "年金", "基礎年金番号", "郵便番号") & "は " & total & " 桁の数字で入力してください：" & s
+    ElseIf Mid$(kind, 3, 1) = "上" Then
+        SplitDigits = Left$(d, n)
+    Else
+        SplitDigits = Right$(d, n)
+    End If
+End Function
+
+' 電話番号「市外局番-市内局番-番号」の n 番目
+Private Function PhonePart(ByVal s As String, ByVal n As Long) As String
+    Dim p() As String
+    s = StrConv(s, vbNarrow)
+    s = Replace(Replace(s, ChrW(&H2212), "-"), ChrW(&H30FC), "-")
+    p = Split(s, "-")
+    If UBound(p) <> 2 Then
+        AddMsg "エラー", "電話番号は「市外局番-市内局番-番号」の形式で入力してください：" & s
+    Else
+        PhonePart = Trim$(p(n - 1))
+    End If
 End Function
 
 Private Function FormatAs(ByVal v As Variant, ByVal fmt As String) As String
@@ -433,6 +505,7 @@ End Function
 ' 0=問題なし 1=機種依存文字あり（警告） 2=Shift_JISで表せない（エラー）
 Private Function SjisLevel(ByVal s As String) As Integer
     Dim i As Long, ch As String, b() As Byte, code As Long
+    If gSkipSjis Then Exit Function
     For i = 1 To Len(s)
         ch = Mid$(s, i, 1)
         b = StrConv(ch, vbFromUnicode)
@@ -492,23 +565,40 @@ Private Function NormName(ByVal s As String) As String
     NormName = s
 End Function
 
-' 「列名=値」「列名<>値」（値は空でもよい）を判定する。空なら常に True
+' 条件の判定。空なら常に True。「列名=値」「列名<>値」「列名~値（含む）」、「|」でつなぐと「または」
 Private Function CondOK(ByVal cond As String, ws As Worksheet, ByVal r As Long, hdr As Variant) As Boolean
-    Dim p As Long, nm As String, want As String, neg As Boolean, c As Long, cur As String
+    Dim part As Variant
     cond = Trim$(cond)
     If cond = "" Then CondOK = True: Exit Function
+    For Each part In Split(cond, "|")
+        If CondOne(CStr(part), ws, r, hdr) Then CondOK = True: Exit Function
+    Next part
+End Function
+
+Private Function CondOne(ByVal cond As String, ws As Worksheet, ByVal r As Long, hdr As Variant) As Boolean
+    Dim p As Long, nm As String, want As String, op As String, c As Long, cur As String
+    cond = Trim$(cond)
     p = InStr(cond, "<>")
     If p > 0 Then
-        neg = True: nm = Trim$(Left$(cond, p - 1)): want = Trim$(Mid$(cond, p + 2))
+        op = "<>": nm = Trim$(Left$(cond, p - 1)): want = Trim$(Mid$(cond, p + 2))
     Else
-        p = InStr(cond, "=")
-        If p = 0 Then AddMsg "エラー", "条件の書き方が正しくありません：" & cond: Exit Function
-        nm = Trim$(Left$(cond, p - 1)): want = Trim$(Mid$(cond, p + 1))
+        p = InStr(cond, "~")
+        If p > 0 Then
+            op = "~": nm = Trim$(Left$(cond, p - 1)): want = Trim$(Mid$(cond, p + 1))
+        Else
+            p = InStr(cond, "=")
+            If p = 0 Then AddMsg "エラー", "条件の書き方が正しくありません：" & cond: Exit Function
+            op = "=": nm = Trim$(Left$(cond, p - 1)): want = Trim$(Mid$(cond, p + 1))
+        End If
     End If
     c = ColOf(hdr, nm)
     If c <= 0 Then AddMsg "エラー", "条件の列「" & nm & "」が見つからないか、重複しています": Exit Function
     cur = Trim$(CellText(ws.Cells(r, c).Value))
-    CondOK = ((cur = want) Xor neg)
+    Select Case op
+    Case "<>": CondOne = (cur <> want)
+    Case "~": CondOne = (InStr(cur, want) > 0)
+    Case Else: CondOne = (cur = want)
+    End Select
 End Function
 
 Private Function IsMarked(ByVal v As Variant) As Boolean
@@ -621,6 +711,16 @@ Private Sub MarkExported(ByVal kind As String, info As Variant, grid As Collecti
         If s <> "" Then s = s & " / "
         ws.Cells(grid(i)(0), c).Value = s & kind & ":" & Format$(Now, "yyyy/mm/dd hh:nn")
     Next i
+End Sub
+
+' 媒体通番（設定シート）を1つ進める。999の次は001
+Private Sub BumpSeq()
+    Dim n As Long, ok As Boolean
+    n = Val(Setting("媒体通番", ok))
+    If Not ok Then Exit Sub
+    n = n + 1
+    If n > 999 Then n = 1
+    ThisWorkbook.Names("媒体通番").RefersToRange.Value = Format$(n, "000")
 End Sub
 
 Private Sub WriteLog(ByVal kind As String, ByVal n As Long, ByVal path As String, ByVal result As String)

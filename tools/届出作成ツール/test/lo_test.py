@@ -20,7 +20,7 @@ from com.sun.star.beans import PropertyValue
 
 HERE = Path(__file__).resolve().parent
 TOOL = HERE.parent
-BOOK = TOOL / "届出作成ツール_v1.0.xlsx"
+BOOK = TOOL / "届出作成ツール_v1.1.xlsx"
 
 
 def pv(n, v):
@@ -154,6 +154,7 @@ TEST_MODULE = '''Option VBASupport 1
 Option Explicit
 Public Sub RunKind(ByVal kind As String, ByVal mode As String)
     gTestMode = True
+    gSkipSjis = True
     ThisWorkbook.Worksheets("出力").Range("B3").Value = kind
     If mode = "check" Then
         btnCheck
@@ -169,10 +170,8 @@ End Sub
 def install_vba(doc):
     src = (TOOL / "vba" / "modExport_utf8.bas").read_text(encoding="utf-8")
     body = "\n".join(l for l in src.splitlines() if not l.startswith("Attribute VB_Name"))
-    # LibreOffice の StrConv(vbFromUnicode) は日本語を常に「?」にするため、Shift_JIS 判定だけ外して試験する
-    # （判定そのものは Windows Excel で確認する項目）
-    assert "lvl = SjisLevel(s)" in body
-    body = body.replace("lvl = SjisLevel(s)", "lvl = 0")
+    # LibreOffice の StrConv(vbFromUnicode) は日本語を常に「?」にするため、試験用フラグ gSkipSjis で
+    # Shift_JIS 判定だけ省く（判定そのものは Windows Excel で確認する項目）
     libs = doc.BasicLibraries
     libs.VBACompatibilityMode = True
     lib = libs.getByName("Standard")
@@ -209,14 +208,35 @@ def confirm_rows(bk):
     return rows
 
 
+TODAY = date.today().strftime("%Y%m%d")
+
+
+def head(seq):
+    return [f"37,00,ﾀﾐ,{seq},{TODAY},22223", "[kanri]", ",001",
+            "37,00,ﾀﾐ,99999,000,0000,長野県ダミー市ダミー町１－１,社会福祉法人ダミー会,事業　太郎,0263,00,0000", "[data]"]
+
+
+EXPECT_SYUTOKU = head("001") + [
+    "2200700,37,00,ﾀﾐ,99999,,ﾔﾏﾀﾞ ﾀﾛｳ,山田　太郎,7,020512,1,1,,,,1234,567890,9,081101,1,250000,0,250000,,,,,,,390,0001,"
+    "ﾅｶﾞﾉｹﾝ ﾀﾞﾐｰｼ ﾀﾞﾐｰﾁｮｳ1-2-3,長野県ダミー市ダミー町１－２－３,,",
+    "2200700,37,00,ﾀﾐ,99999,,ｸﾞｴﾝ ﾃｨﾎｱ,グエン　ティホア,7,100203,2,1,,,,,,9,081101,0,210000,0,210000,,,,,,,390,0002,"
+    "ﾅｶﾞﾉｹﾝ ﾀﾞﾐｰｼ ﾀﾞﾐｰﾏﾁ4-5,長野県ダミー市ダミー町４－５,,",
+    "2200700,37,00,ﾀﾐ,99999,,ｻﾄｳ ﾊﾅｺ,佐藤　花子,5,300820,2,1,,,,0123,456789,9,081116,0,120000,0,120000,1,,,,,,390,0003,"
+    "ﾅｶﾞﾉｹﾝ ﾀﾞﾐｰｼ ﾀﾞﾐｰﾁｮｳ7-8,長野県ダミー市ダミー町７－８,,",
+]
+EXPECT_SOUSHITSU = head("002") + [
+    "2201700,37,00,ﾀﾐ,99999,123,ｽｽﾞｷ ｲﾁﾛｳ,鈴木　一郎,5,600130,,2345,678901,9,081201,4,9,081130,,1,,1,,,,,",
+]
+
+
+def read_csv(path):
+    return path.read_text(encoding="utf-8", errors="replace").splitlines()
+
+
 def test_vba(bk, work, results):
     doc = bk.doc
     install_vba(doc)
-    # 届書コードはCSV仕様書で確定する値。試験では仮の値を入れる
     lay = bk.sh("レイアウト定義")
-    for r in range(4, 200):
-        if lay.getCellByPosition(3, r).getString() == "届書コード":
-            lay.getCellByPosition(5, r).setString("TEST")
 
     # 1) 社保取得：正常
     run(doc, "社保取得", "check")
@@ -225,11 +245,13 @@ def test_vba(bk, work, results):
                     "  " + bk.val("出力", "B6") + ("\n  " + "\n  ".join(msg) if msg else "")))
     run(doc, "社保取得", "export")
     out_dir = work / "出力"
-    csvs = sorted(out_dir.glob("社保取得_*.csv")) if out_dir.exists() else []
+    csvs = sorted(out_dir.glob("社保取得_*/SHFD0006.CSV")) if out_dir.exists() else []
     detail = "  " + bk.val("出力", "B6")
+    got = read_csv(csvs[0]) if csvs else []
     if csvs:
-        detail += "\n  --- " + csvs[-1].name + "\n  " + "\n  ".join(csvs[-1].read_text(encoding="utf-8", errors="replace").splitlines())
-    results.append(("機能B 社保取得 CSV出力", len(csvs) == 1, detail))
+        detail += "\n  --- " + csvs[0].parent.name + "/" + csvs[0].name + "\n  " + "\n  ".join(got)
+    results.append(("機能B 社保取得 SHFD0006.CSV の内容が仕様書の項目順どおり", len(csvs) == 1 and got == EXPECT_SYUTOKU,
+                    detail + ("" if got == EXPECT_SYUTOKU else "\n  期待と違う行：" + str([(a, b) for a, b in zip(got, EXPECT_SYUTOKU) if a != b][:2]))))
     nyu_done = bk.find_col("入職台帳", "出力済")
     marks = [bk.sh("入職台帳").getCellByPosition(nyu_done, r).getString() for r in range(4, 7)]
     results.append(("機能B 出力済の記録", all("社保取得:" in m for m in marks), "  " + " / ".join(marks)))
@@ -241,15 +263,15 @@ def test_vba(bk, work, results):
     bk.sh("入職台帳").getCellByPosition(sex, 4).setString("")
     run(doc, "社保取得", "export")
     msg = messages(bk)
-    n_csv = len(list(out_dir.glob("社保取得_*.csv")))
+    n_csv = len(list(out_dir.glob("社保取得_*/SHFD0006.CSV")))
     results.append(("機能B 必須欠落でエラー・未出力", any("必須項目が空" in m for m in msg) and n_csv == 1,
                     "  " + "\n  ".join(msg[:5]) + f"\n  CSV数={n_csv}（1のままなら未出力）"))
     bk.sh("入職台帳").getCellByPosition(sex, 4).setString("男")
 
-    # 3) カンマ入り → エラー（カナ欄は全角変換で「，」になり区切りにならないため、変換のない氏名欄で試す）
-    kana = bk.find_col("入職台帳", "氏名★必須")
+    # 3) カンマ入り → エラー（漢字欄は全角「，」に直るため対象外。半角カナ欄は「,」が残るのでエラーになる）
+    kana = bk.find_col("入職台帳", "フリガナ")
     old = bk.sh("入職台帳").getCellByPosition(kana, 4).getString()
-    bk.sh("入職台帳").getCellByPosition(kana, 4).setString("山田 太郎,")
+    bk.sh("入職台帳").getCellByPosition(kana, 4).setString("ヤマダ タロウ,")
     run(doc, "社保取得", "check")
     msg = messages(bk)
     results.append(("機能B カンマでエラー", any("カンマ" in m for m in msg),
@@ -261,11 +283,14 @@ def test_vba(bk, work, results):
     # 5) 社保喪失（D005は対象条件で除外される）
     run(doc, "社保喪失", "export")
     msg = messages(bk)
-    csvs = sorted(out_dir.glob("社保喪失_*.csv"))
+    csvs = sorted(out_dir.glob("社保喪失_*/SHFD0006.CSV"))
     detail = "  " + bk.val("出力", "B6") + "\n  " + "\n  ".join(msg)
+    got = read_csv(csvs[0]) if csvs else []
     if csvs:
-        detail += "\n  --- " + csvs[-1].name + "\n  " + csvs[-1].read_text(encoding="utf-8", errors="replace")
-    results.append(("機能B 社保喪失 CSV（D004のみ）", len(csvs) == 1 and any("除外" in m for m in msg), detail))
+        detail += "\n  --- " + csvs[0].parent.name + "\n  " + "\n  ".join(got)
+    results.append(("機能B 社保喪失 SHFD0006.CSV（D004のみ・除外の通知あり）",
+                    len(csvs) == 1 and got == EXPECT_SOUSHITSU and any("除外" in m for m in msg),
+                    detail + ("" if got == EXPECT_SOUSHITSU else "\n  期待と違う行：" + str([(a, b) for a, b in zip(got, EXPECT_SOUSHITSU) if a != b][:2]))))
 
     # 6) 雇保取得・喪失（転記一覧）
     for kind in ("雇保取得", "雇保喪失"):
@@ -280,9 +305,10 @@ def test_vba(bk, work, results):
     # 7) 2回目の出力：出力済でも出力でき、出力済欄に追記される
     run(doc, "社保取得", "export")
     marks = [bk.sh("入職台帳").getCellByPosition(nyu_done, r).getString() for r in range(4, 7)]
-    n_csv = len(list(out_dir.glob("社保取得_*.csv")))
-    results.append(("機能B 2回目の出力（追記・別ファイル）", all(m.count("社保取得:") == 2 for m in marks) and n_csv == 2,
-                    "  " + bk.val("出力", "B6") + f"\n  CSV数={n_csv}\n  " + marks[0]))
+    n_csv = len(list(out_dir.glob("社保取得_*/SHFD0006.CSV")))
+    seq = bk.val("設定", "C17")
+    results.append(("機能B 2回目の出力（追記・別フォルダ・媒体通番が進む）", all(m.count("社保取得:") == 2 for m in marks) and n_csv == 2 and seq == "004",
+                    "  " + bk.val("出力", "B6") + f"\n  CSV数={n_csv} 媒体通番={seq}（取得・喪失・取得の3回出力後なので004）\n  " + marks[0]))
 
     # 8) 台帳クリア：値は消え、表示用の数式は残る
     run(doc, "社保取得", "clear")
