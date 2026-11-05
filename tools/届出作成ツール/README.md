@@ -11,7 +11,7 @@
 | `vba/modExport.bas` | VBEで取り込むファイル（Shift_JIS・CRLF）。**直接編集しない** |
 | `vba/modExport_utf8.bas` | マクロの原本（UTF-8。GitHubで読める）。直すのはこちら |
 | `build_tool.py` | ブックと `modExport.bas` を作り直すスクリプト |
-| `test/lo_test.py` | LibreOfficeでの自動試験18項目（Windows Excelでの最終確認の前の予備試験） |
+| `test/lo_test.py` | LibreOfficeでの自動試験19項目（Windows Excelでの最終確認の前の予備試験） |
 
 v1.0 からの変更：社保取得・社保喪失のCSVを、年金機構の電子媒体届書作成仕様書（令和8年10月 第17.0版）の形式にした。設定シートの項目が変わった（事業所整理記号 → 都道府県コード・郡市区符号・事業所記号など）ので、v1.0 のブックは使い続けず、v1.1 に入れ替える。
 
@@ -58,3 +58,4 @@ python3 "tools/届出作成ツール/test/lo_test.py" /tmp/届出試験
 - `build_tool.py` はダミーデータ入りの初期状態を作る。**運用開始後のブック（実値入り）を上書きしないこと。** 運用後の修正はブック側で行い、マクロを直したときは原本（UTF-8）を直して `build_tool.py` で `modExport.bas` を作り、VBEで古いモジュールを削除してから取り込み直す。
 - LibreOfficeの試験では Shift_JIS 判定（機種依存文字の警告）とUTF-8以外の書き出しは確認できない。Windows Excelで確認する（テスト記録の「Windowsで確認する項目」）。
 - 試験用フラグ：`gTestMode`（メッセージボックスを出さない）、`gSkipSjis`（Shift_JIS判定を省く）。運用では使わない。
+- レイアウト定義を直したら、`docs/YYYYMMDD_変更指示書_届出作成ツール.md` を作り、実装手順書 第16章に記録する（管理者は変更指示書を見て実値入りブックを手で直す）。

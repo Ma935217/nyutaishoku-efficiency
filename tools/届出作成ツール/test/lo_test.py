@@ -310,6 +310,17 @@ def test_vba(bk, work, results):
     results.append(("機能B 2回目の出力（追記・別フォルダ・媒体通番が進む）", all(m.count("社保取得:") == 2 for m in marks) and n_csv == 2 and seq == "004",
                     "  " + bk.val("出力", "B6") + f"\n  CSV数={n_csv} 媒体通番={seq}（取得・喪失・取得の3回出力後なので004）\n  " + marks[0]))
 
+    # 7-2) 設定の事業所記号を全角で入れても、CSVでは半角カナになる（監査 A1。仕様書 表4.1.1-1 項番3）
+    bk.set("設定", "C15", "タミ")
+    run(doc, "社保取得", "export")
+    newest = max(out_dir.glob("社保取得_*/SHFD0006.CSV"), key=lambda p: p.stat().st_mtime)
+    got = read_csv(newest)
+    ok = (len(got) >= 6 and got[0].startswith("37,00,ﾀﾐ,") and got[3].startswith("37,00,ﾀﾐ,99999,")
+          and all(l.startswith("2200700,37,00,ﾀﾐ,99999,") for l in got[5:]))
+    results.append(("機能B 事業所記号を全角で入れても半角カナで出力", ok,
+                    "  設定=タミ（全角）\n  " + "\n  ".join(got[:6])))
+    bk.set("設定", "C15", "ﾀﾐ")
+
     # 8) 台帳クリア：値は消え、表示用の数式は残る
     run(doc, "社保取得", "clear")
     ws = bk.sh("入職台帳")
